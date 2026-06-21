@@ -173,6 +173,168 @@ Exemplo:
 
 ---
 
+### Consultar rankings
+
+```http
+GET /api/v1/edicoes/{id_edicao}/rankings
+```
+
+Retorna os rankings apresentados na edição.
+
+Exemplo:
+
+```json
+{
+  "titulo": "Setores que mais cresceram",
+  "itens": [
+    {
+      "posicao": 1,
+      "nome_item": "Tecnologia",
+      "valor": 24.5
+    },
+    {
+      "posicao": 2,
+      "nome_item": "Saúde",
+      "valor": 18.2
+    }
+  ]
+}
+```
+
+---
+
+### Consultar alertas e oportunidades
+
+```http
+GET /api/v1/edicoes/{id_edicao}/alertas-oportunidades
+```
+
+Retorna os principais alertas e oportunidades destacados na publicação.
+
+Exemplo:
+
+```json
+{
+  "alertas": [
+    {
+      "titulo": "Queda da margem operacional",
+      "descricao": "Empresas estão crescendo receita, mas reduzindo rentabilidade."
+    }
+  ],
+  "oportunidades": [
+    {
+      "titulo": "Expansão do setor de serviços",
+      "descricao": "Setor apresenta crescimento acima da média."
+    }
+  ]
+}
+```
+
+---
+
+### Consultar matriz crescimento x saúde
+
+```http
+GET /api/v1/edicoes/{id_edicao}/matriz-crescimento-saude
+```
+
+Retorna os dados utilizados para compor a matriz da publicação.
+
+Exemplo:
+
+```json
+{
+  "quadrantes": [
+    {
+      "nome": "Cresce e está saudável",
+      "itens": [
+        "Tecnologia",
+        "Serviços"
+      ]
+    },
+    {
+      "nome": "Cresce, mas está pressionado",
+      "itens": [
+        "Varejo"
+      ]
+    }
+  ]
+}
+```
+
+---
+
+### Consultar guia de interpretação
+
+```http
+GET /api/v1/edicoes/{id_edicao}/guia-interpretacao
+```
+
+Retorna conteúdos de apoio para interpretação dos indicadores.
+
+Exemplo:
+
+```json
+{
+  "conteudos": [
+    {
+      "titulo": "Como interpretar a mediana",
+      "texto": "A mediana representa o valor central da distribuição."
+    }
+  ]
+}
+```
+
+---
+
+### Consultar conteúdo editorial
+
+```http
+GET /api/v1/edicoes/{id_edicao}/editorial/{tipo}
+```
+
+Retorna cartas, apresentações e demais conteúdos editoriais da edição.
+
+Exemplo:
+
+```json
+{
+  "titulo": "Carta da CEO",
+  "autor": "Fernanda",
+  "cargo": "CEO",
+  "texto": "Mensagem editorial da edição."
+}
+```
+
+---
+
+### Consultar metodologia
+
+```http
+GET /api/v1/edicoes/{id_edicao}/metodologia
+```
+
+Retorna a metodologia utilizada na construção dos indicadores da publicação.
+
+Exemplo:
+
+```json
+{
+  "fontes": [
+    "Fiscal",
+    "Financeiro",
+    "Contábil"
+  ],
+  "criterios": [
+    "Uso da mediana",
+    "Tratamento de outliers",
+    "Anonimização dos dados"
+  ]
+}
+```
+
+---
+
 ### Cadastro de usuários
 
 ```http
@@ -213,6 +375,10 @@ A aplicação será alimentada inicialmente por planilhas organizadas em abas, r
 * indicadores
 * setores
 * regioes
+* rankings
+* alertas_oportunidades
+* metodologia
+* editoriais
 * leads
 
 O backend será responsável por converter essas informações em estruturas Python para consumo dos endpoints.
