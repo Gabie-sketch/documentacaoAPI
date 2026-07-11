@@ -1,0 +1,581 @@
+# Nucont Benchmarking — Documentação Técnica
+
+## Banco de Dados — Tipos SQLAlchemy
+### Verificação de consistência com o Contrato de API — v3
+
+*Julho de 2026 — Documento para validação do time de Backend, Front-end e API*
+
+---
+
+## 1. Objetivo deste documento
+
+Este documento atualiza a documentação de banco de dados do Nucont Benchmarking, originalmente escrita com tipos nativos do SQLite (`TEXT`, `INTEGER`, `REAL`), convertendo cada coluna para os tipos genéricos ("Generic CamelCase Types") do SQLAlchemy — o ORM utilizado pelo backend em Python/FastAPI.
+
+Esta é a segunda rodada de verificação, feita a partir do contrato de API v3. Cada tabela foi reconferida contra os endpoints e exemplos de resposta do novo contrato, verificando se os nomes de campo e o formato das respostas batem com o que está modelado no banco. Onde há divergência, ela está sinalizada em destaque logo após a tabela correspondente; onde uma divergência da rodada anterior foi corrigida, isso também está indicado.
+
+A v3 também introduziu um endpoint novo (Índices Nucont da Economia Real) que ainda não tem tabela no banco — uma proposta de modelagem para ele está incluída na seção 3.11.
+
+Ao final, um quadro resume o status de todas as divergências identificadas até agora, para facilitar a validação em conjunto com quem escreveu o contrato de API (Membro A) e quem desenhou o banco original (Membro B).
+
+### 1.1 O que mudou desde a rodada anterior (v2 → v3)
+
+| Item | Status | O que mudou |
+|---|---|---|
+| `rankings` | ✓ Resolvida | Agora devolve uma lista de rankings agrupados por `(id_edicao, slug)`, cada um com seus itens dentro — exatamente como recomendado. |
+| `textos_editoriais` | ✓ Resolvida | `GET /editorial/{tipo}` agora devolve uma lista (carta da CEO + carta do Editor-Chefe), não mais um objeto único. |
+| `metodologia` | ◐ Reconhecida | O contrato ainda mostra fontes/critérios como dois arrays soltos, mas agora isso já consta oficialmente como pendência (seção 17 do escopo/contrato): "granularidade da resposta: listas simples vs. registros com descrição por critério". |
+| `setores` / `regioes` | — Ainda aberta | Contrato continua usando `"nome"` na listagem e no detalhe; banco tem `nome_setor` / `nome_regiao`. |
+| `indicadores` → setores/regiões | — Ainda aberta | Contrato continua devolvendo o nome de exibição do setor/região; banco guarda o slug. |
+| `indices-nucont` | ★ Novo | Endpoint novo na v3, sem tabela correspondente no banco. Proposta de modelagem incluída na seção 3.11. |
+
+---
+
+## 2. Convenções de tipos utilizadas
+
+- **String** — texto curto: nomes, slugs, títulos, categorias, unidades, fontes.
+- **Text** — texto longo/editorial: corpo de texto, definições, notas metodológicas.
+- **Integer** — números inteiros: IDs, ordens, quantidades, trimestre, ano.
+- **Float** — números com casas decimais: valores, percentuais, variações.
+- **Date** — datas (ex: data de publicação). O SQLAlchemy converte automaticamente para o formato interno do SQLite; não é mais necessário guardar como texto solto.
+- **ForeignKey("tabela.coluna")** — sempre que o campo apontar para outra tabela.
+
+Enums simples (como o `status` da edição) continuam representados como `String` combinado com `CheckConstraint`, mantendo consistência com o padrão já adotado no guia de implementação de entidades — o SQLAlchemy tem um tipo `Enum` próprio, mas ele não é usado atualmente no projeto.
+
+---
+
+## 3. Tabelas do banco de dados
+
+Cada tabela segue o mesmo formato: descrição, tabela de campos com os tipos SQLAlchemy, e o modelo Python correspondente (padrão `app/models.py`).
+
+### 3.1 · edicoes
+
+Tabela raiz — cada linha é uma edição trimestral publicada.
+
+| Campo | Tipo (SQLAlchemy) | PK/FK | Nulo? | Descrição |
+|---|---|---|---|---|
+| `id_edicao` | String | PK | não | Slug da edição, usado como ID (ex: `"q1-2026"`). |
+| `titulo` | String | — | não | Título oficial da edição. |
+| `subtitulo` | String | — | sim | Subtítulo / headline da capa. |
+| `trimestre` | Integer | — | não | 1 a 4. |
+| `ano` | Integer | — | não | Ex: 2026. |
+| `data_publicacao` | Date | — | sim | Data de publicação. |
+| `descricao` | String | — | sim | Descrição curta (cards/listagens). |
+| `url_pdf` | String | — | sim | Link do PDF. |
+| `status` | String | — | não | `rascunho`, `publicado` ou `arquivado`. |
+| `meta_title` | String | — | sim | SEO. |
+| `meta_description` | String | — | sim | SEO. |
+
+```python
+class Edicao(Base):
+    __tablename__ = "edicoes"
+
+    id_edicao = Column(String, primary_key=True)
+    titulo = Column(String, nullable=False)
+    subtitulo = Column(String, nullable=True)
+    trimestre = Column(Integer, nullable=False)
+    ano = Column(Integer, nullable=False)
+    data_publicacao = Column(Date, nullable=True)
+    descricao = Column(String, nullable=True)
+    url_pdf = Column(String, nullable=True)
+    status = Column(String, nullable=False, default="rascunho")
+    meta_title = Column(String, nullable=True)
+    meta_description = Column(String, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("trimestre BETWEEN 1 AND 4"),
+        CheckConstraint("status IN ('rascunho','publicado','arquivado')"),
+    )
+```
+
+✅ Bate com o contrato de API (`GET /api/v1/edicoes`): `id_edicao`, `titulo`, `subtitulo`, `trimestre`, `ano`, `status` — todos os nomes conferem.
+
+---
+
+### 3.2 · capitulos
+
+Cada linha é um capítulo de uma edição (sumário, raio-x, índices, etc.).
+
+| Campo | Tipo (SQLAlchemy) | PK/FK | Nulo? | Descrição |
+|---|---|---|---|---|
+| `id_capitulo` | Integer | PK (auto) | não | Gerado pelo banco. |
+| `id_edicao` | String | FK → edicoes | não | Edição à qual pertence. |
+| `ordem` | Integer | — | não | Posição no sumário. |
+| `titulo` | String | — | não | Título do capítulo. |
+| `slug` | String | — | não | Usado na URL. Único por edição. |
+| `tipo_template` | String | — | não | Define o template de tela (indicador, setor, regiao, carta). |
+| `pagina_impressa` | Integer | — | sim | Página correspondente no PDF. |
+| `descricao` | String | — | sim | Descrição curta exibida no sumário. |
+| `texto_editorial` | Text | — | sim | Corpo de texto editorial. |
+| `meta_title` | String | — | sim | SEO. |
+| `meta_description` | String | — | sim | SEO. |
+
+```python
+class Capitulo(Base):
+    __tablename__ = "capitulos"
+
+    id_capitulo = Column(Integer, primary_key=True, autoincrement=True)
+    id_edicao = Column(String, ForeignKey("edicoes.id_edicao"), nullable=False)
+    ordem = Column(Integer, nullable=False)
+    titulo = Column(String, nullable=False)
+    slug = Column(String, nullable=False)
+    tipo_template = Column(String, nullable=False)
+    pagina_impressa = Column(Integer, nullable=True)
+    descricao = Column(String, nullable=True)
+    texto_editorial = Column(Text, nullable=True)
+    meta_title = Column(String, nullable=True)
+    meta_description = Column(String, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("id_edicao", "slug"),
+    )
+```
+
+✅ Bate com o contrato (`GET /edicoes/{id}/capitulos`): `id_capitulo`, `titulo`, `slug`, `ordem`.
+
+---
+
+### 3.3 · indicadores
+
+Cada linha é um indicador econômico dentro de uma edição (receita mediana, margem operacional, etc.).
+
+| Campo | Tipo (SQLAlchemy) | PK/FK | Nulo? | Descrição |
+|---|---|---|---|---|
+| `id_indicador` | Integer | PK (auto) | não | Gerado. |
+| `id_edicao` | String | FK → edicoes | não | Edição à qual pertence. |
+| `nome` | String | — | não | Nome de exibição (ex: "Receita Mediana"). |
+| `slug` | String | — | não | Usado na URL. Único por edição. |
+| `categoria` | String | — | sim | Agrupamento (financeiro, operacional). |
+| `definicao` | Text | — | sim | Texto do box "o que mede". |
+| `unidade` | String | — | sim | BRL, %, dias... |
+| `valor_principal` | Float | — | sim | Valor central do indicador no trimestre. |
+| `variacao` | Float | — | sim | Variação percentual vs. período anterior. |
+| `comparativo` | String | — | sim | Texto/rótulo do que está sendo comparado. |
+| `p25` / `p50` / `p75` / `p90` | Float | — | sim | Valores de distribuição por percentil. |
+| `texto_interpretativo` | Text | — | sim | Texto de "como interpretar". |
+| `fonte` | String | — | sim | Fonte do dado. |
+| `nota_metodologica` | Text | — | sim | Nota metodológica específica. |
+
+```python
+class Indicador(Base):
+    __tablename__ = "indicadores"
+
+    id_indicador = Column(Integer, primary_key=True, autoincrement=True)
+    id_edicao = Column(String, ForeignKey("edicoes.id_edicao"), nullable=False)
+    nome = Column(String, nullable=False)
+    slug = Column(String, nullable=False)
+    categoria = Column(String, nullable=True)
+    definicao = Column(Text, nullable=True)
+    unidade = Column(String, nullable=True)
+    valor_principal = Column(Float, nullable=True)
+    variacao = Column(Float, nullable=True)
+    comparativo = Column(String, nullable=True)
+    p25 = Column(Float, nullable=True)
+    p50 = Column(Float, nullable=True)
+    p75 = Column(Float, nullable=True)
+    p90 = Column(Float, nullable=True)
+    texto_interpretativo = Column(Text, nullable=True)
+    fonte = Column(String, nullable=True)
+    nota_metodologica = Column(Text, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("id_edicao", "slug"),
+    )
+```
+
+✅ Campos principais batem (`nome`, `valor_principal`, `variacao`, `p25/p50/p75/p90`).
+
+⚠️ **Divergência 1 — setores/regiões dentro do indicador:** o contrato mostra, na resposta de `GET /indicadores/{slug}`, os blocos `"setores": [{"setor": "Indústria", "valor": 238000}]` e `"regioes": [{"regiao": "Sudeste", "valor": 158000}]` — ou seja, o campo é o **nome** de exibição. Mas nas tabelas de associação (`indicadores_setores`/`indicadores_regioes`) o que se guarda é o **slug**. O endpoint vai precisar de um join com `setores`/`regioes` para devolver o nome no lugar do slug — confirmar se isso já era esperado por quem documentou a API.
+
+> ✅ **Como resolver:** no endpoint (Passo 4), fazer join com `setores`/`regioes` na hora de montar a resposta, em vez de devolver o slug direto:
+> ```python
+> resultado_setores = (
+>     db.query(models.IndicadorSetor, models.Setor.nome_setor)
+>     .join(
+>         models.Setor,
+>         (models.IndicadorSetor.setor_slug == models.Setor.slug) &
+>         (models.IndicadorSetor.id_edicao == models.Setor.id_edicao),
+>     )
+>     .filter(models.IndicadorSetor.id_indicador == indicador.id_indicador)
+>     .all()
+> )
+> ```
+> Só é possível implementar depois que `setores`/`regioes` existirem de verdade — por isso essas tabelas ainda estão fora da V1.
+
+---
+
+### 3.4 · setores
+
+Cada linha é um setor econômico analisado em uma edição.
+
+| Campo | Tipo (SQLAlchemy) | PK/FK | Nulo? | Descrição |
+|---|---|---|---|---|
+| `id_setor` | Integer | PK (auto) | não | Gerado. |
+| `id_edicao` | String | FK → edicoes | não | Edição à qual pertence. |
+| `nome_setor` | String | — | não | Nome de exibição do setor. |
+| `slug` | String | — | não | Usado na URL. Único por edição. |
+| `empresas_analisadas` | Integer | — | sim | Tamanho da amostra. |
+| `indicador_1/2/3_nome` | String | — | sim | Destaques rápidos do setor (campo achatado). |
+| `indicador_1/2/3_valor` | Float | — | sim | Valor de cada destaque. |
+| `texto_editorial` | Text | — | sim | Texto editorial do setor. |
+| `alerta` | String | — | sim | Texto de alerta. |
+| `oportunidade` | String | — | sim | Texto de oportunidade. |
+
+```python
+class Setor(Base):
+    __tablename__ = "setores"
+
+    id_setor = Column(Integer, primary_key=True, autoincrement=True)
+    id_edicao = Column(String, ForeignKey("edicoes.id_edicao"), nullable=False)
+    nome_setor = Column(String, nullable=False)
+    slug = Column(String, nullable=False)
+    empresas_analisadas = Column(Integer, nullable=True)
+    indicador_1_nome = Column(String, nullable=True)
+    indicador_1_valor = Column(Float, nullable=True)
+    indicador_2_nome = Column(String, nullable=True)
+    indicador_2_valor = Column(Float, nullable=True)
+    indicador_3_nome = Column(String, nullable=True)
+    indicador_3_valor = Column(Float, nullable=True)
+    texto_editorial = Column(Text, nullable=True)
+    alerta = Column(String, nullable=True)
+    oportunidade = Column(String, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("id_edicao", "slug"),
+    )
+```
+
+⚠️ **Divergência 2 — nome do campo:** o contrato (`GET /setores/{slug}`) devolve o campo como `"nome"`. No banco, o campo é `nome_setor`. É preciso decidir: renomear a coluna para `nome`, ou fazer o de-para (`nome_setor` → `nome`) no schema de resposta. Como setores/regiões ainda não foram implementados, dá para resolver isso antes de codificar.
+
+> ✅ **Como resolver:** recomendado renomear a coluna para `nome` direto no Passo 1, já que a tabela ainda não existe (sem custo de migration):
+> ```python
+> nome = Column(String, nullable=False)   # em vez de nome_setor
+> ```
+> Alternativa, se preferirem manter `nome_setor` no banco: mapear no Schema (Passo 2) com `Field(alias="nome_setor")` + `populate_by_name=True` no Pydantic.
+
+---
+
+### 3.5 · regioes
+
+Mesma estrutura de `setores`, trocando setor por região.
+
+| Campo | Tipo (SQLAlchemy) | PK/FK | Nulo? | Descrição |
+|---|---|---|---|---|
+| `id_regiao` | Integer | PK (auto) | não | Gerado. |
+| `id_edicao` | String | FK → edicoes | não | Edição à qual pertence. |
+| `nome_regiao` | String | — | não | Nome de exibição (ex: "Sudeste"). |
+| `slug` | String | — | não | Usado na URL. Único por edição. |
+| `empresas_analisadas` | Integer | — | sim | Tamanho da amostra. |
+| `indicador_1/2/3_nome` | String | — | sim | Destaques rápidos (mesma lógica de setores). |
+| `indicador_1/2/3_valor` | Float | — | sim | Valor de cada destaque. |
+| `texto_editorial` | Text | — | sim | Texto editorial. |
+| `alerta` | String | — | sim | Texto de alerta. |
+| `oportunidade` | String | — | sim | Texto de oportunidade. |
+
+```python
+class Regiao(Base):
+    __tablename__ = "regioes"
+
+    id_regiao = Column(Integer, primary_key=True, autoincrement=True)
+    id_edicao = Column(String, ForeignKey("edicoes.id_edicao"), nullable=False)
+    nome_regiao = Column(String, nullable=False)
+    slug = Column(String, nullable=False)
+    empresas_analisadas = Column(Integer, nullable=True)
+    indicador_1_nome = Column(String, nullable=True)
+    indicador_1_valor = Column(Float, nullable=True)
+    indicador_2_nome = Column(String, nullable=True)
+    indicador_2_valor = Column(Float, nullable=True)
+    indicador_3_nome = Column(String, nullable=True)
+    indicador_3_valor = Column(Float, nullable=True)
+    texto_editorial = Column(Text, nullable=True)
+    alerta = Column(String, nullable=True)
+    oportunidade = Column(String, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("id_edicao", "slug"),
+    )
+```
+
+⚠️ **Divergência 3 — mesmo caso da tabela anterior:** o contrato usa `"nome"`, o banco usa `nome_regiao`. Mesma decisão a ser tomada: renomear a coluna ou mapear no schema de resposta.
+
+> ✅ **Como resolver:** mesma recomendação da tabela anterior — renomear direto no Passo 1, já que ainda não existe migration a proteger:
+> ```python
+> nome = Column(String, nullable=False)   # em vez de nome_regiao
+> ```
+
+---
+
+### 3.6 · indicadores_setores
+
+Tabela de associação: recorte de um indicador específico por setor (ex: "Margem Operacional no setor de Tecnologia").
+
+| Campo | Tipo (SQLAlchemy) | PK/FK | Nulo? | Descrição |
+|---|---|---|---|---|
+| `id_indicador_setor` | Integer | PK (auto) | não | Gerado. |
+| `id_indicador` | Integer | FK → indicadores | não | Indicador recortado. |
+| `id_edicao` | String | FK → edicoes | não | Redundante, facilita filtros. |
+| `setor_slug` | String | FK → setores (composta) | não | Setor ao qual o valor se refere. |
+| `valor` | Float | — | sim | Valor do indicador para o setor. |
+| `variacao` | Float | — | sim | Variação. |
+| `observacao` | Text | — | sim | Observação textual. |
+| `ordem` | Integer | — | sim | Ordem de exibição. |
+
+```python
+class IndicadorSetor(Base):
+    __tablename__ = "indicadores_setores"
+
+    id_indicador_setor = Column(Integer, primary_key=True, autoincrement=True)
+    id_indicador = Column(Integer, ForeignKey("indicadores.id_indicador"), nullable=False)
+    id_edicao = Column(String, ForeignKey("edicoes.id_edicao"), nullable=False)
+    setor_slug = Column(String, nullable=False)
+    valor = Column(Float, nullable=True)
+    variacao = Column(Float, nullable=True)
+    observacao = Column(Text, nullable=True)
+    ordem = Column(Integer, nullable=True)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["id_edicao", "setor_slug"], ["setores.id_edicao", "setores.slug"]
+        ),
+    )
+```
+
+> Nota: segundo o guia de implementação de entidades, esta tabela ainda está fora da V1 ("depende de alinhamento com o banco"). Mantida aqui apenas como referência de modelagem futura.
+
+---
+
+### 3.7 · indicadores_regioes
+
+Mesma lógica de `indicadores_setores`, aplicada a regiões.
+
+| Campo | Tipo (SQLAlchemy) | PK/FK | Nulo? | Descrição |
+|---|---|---|---|---|
+| `id_indicador_regiao` | Integer | PK (auto) | não | Gerado. |
+| `id_indicador` | Integer | FK → indicadores | não | Indicador recortado. |
+| `id_edicao` | String | FK → edicoes | não | Redundante, facilita filtros. |
+| `regiao_slug` | String | FK → regioes (composta) | não | Região à qual o valor se refere. |
+| `valor` | Float | — | sim | Valor do indicador para a região. |
+| `variacao` | Float | — | sim | Variação. |
+| `observacao` | Text | — | sim | Observação textual. |
+| `ordem` | Integer | — | sim | Ordem de exibição. |
+
+```python
+class IndicadorRegiao(Base):
+    __tablename__ = "indicadores_regioes"
+
+    id_indicador_regiao = Column(Integer, primary_key=True, autoincrement=True)
+    id_indicador = Column(Integer, ForeignKey("indicadores.id_indicador"), nullable=False)
+    id_edicao = Column(String, ForeignKey("edicoes.id_edicao"), nullable=False)
+    regiao_slug = Column(String, nullable=False)
+    valor = Column(Float, nullable=True)
+    variacao = Column(Float, nullable=True)
+    observacao = Column(Text, nullable=True)
+    ordem = Column(Integer, nullable=True)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["id_edicao", "regiao_slug"], ["regioes.id_edicao", "regioes.slug"]
+        ),
+    )
+```
+
+> Nota: também fora da V1 por enquanto, segundo o guia de implementação.
+
+---
+
+### 3.8 · rankings
+
+Cada linha é um item dentro de uma lista de ranking (ex: linha 1 = "Tecnologia" na posição 1 de "Setores que mais cresceram").
+
+| Campo | Tipo (SQLAlchemy) | PK/FK | Nulo? | Descrição |
+|---|---|---|---|---|
+| `id_ranking` | Integer | PK (auto) | não | Identifica cada item, não o ranking inteiro. |
+| `id_edicao` | String | FK → edicoes | não | Edição à qual pertence. |
+| `titulo` | String | — | não | Nome do ranking, repetido em todas as linhas do mesmo ranking. |
+| `slug` | String | — | não | Identificador do ranking, usado para agrupar e montar URL. |
+| `descricao` | String | — | sim | Descrição do ranking. |
+| `posicao` | Integer | — | não | Posição do item (1º, 2º...). |
+| `nome_item` | String | — | não | Nome da entidade ranqueada. |
+| `tipo_item` | String | — | sim | setor, regiao, indicador. |
+| `valor` | Float | — | sim | Valor associado à posição. |
+| `variacao` | Float | — | sim | Variação. |
+| `observacao` | Text | — | sim | Observação. |
+
+```python
+class Ranking(Base):
+    __tablename__ = "rankings"
+
+    id_ranking = Column(Integer, primary_key=True, autoincrement=True)
+    id_edicao = Column(String, ForeignKey("edicoes.id_edicao"), nullable=False)
+    titulo = Column(String, nullable=False)
+    slug = Column(String, nullable=False)
+    descricao = Column(String, nullable=True)
+    posicao = Column(Integer, nullable=False)
+    nome_item = Column(String, nullable=False)
+    tipo_item = Column(String, nullable=True)
+    valor = Column(Float, nullable=True)
+    variacao = Column(Float, nullable=True)
+    observacao = Column(Text, nullable=True)
+```
+
+✅ Bate com o contrato v3 (`GET /rankings` e `GET /rankings/{slug}`): `titulo`, `slug`, `descricao`, e cada item com `posicao`, `nome_item`, `tipo_item`, `valor`, `variacao`, `observacao`.
+
+> **Resolvido na v3:** o contrato agora devolve uma lista de rankings agrupados por `(id_edicao, slug)`, cada um com seus itens dentro — a divergência apontada na rodada anterior (objeto único) foi corrigida.
+
+---
+
+### 3.9 · textos_editoriais
+
+Cartas e textos editoriais com autoria (ex: Carta da CEO, Carta do Editor-Chefe).
+
+| Campo | Tipo (SQLAlchemy) | PK/FK | Nulo? | Descrição |
+|---|---|---|---|---|
+| `id_texto` | Integer | PK (auto) | não | Gerado. |
+| `id_edicao` | String | FK → edicoes | não | Edição à qual pertence. |
+| `tipo` | String | — | não | Tipo de texto (ex: carta). |
+| `autor` | String | — | sim | Nome do autor. |
+| `cargo` | String | — | sim | Cargo do autor. |
+| `titulo` | String | — | sim | Título do texto. |
+| `subtitulo` | String | — | sim | Subtítulo. |
+| `texto` | Text | — | sim | Corpo do texto. |
+| `frase_destaque` | String | — | sim | Frase em destaque (pull quote). |
+| `imagem_autor` | String | — | sim | URL/caminho da foto do autor. |
+
+```python
+class TextoEditorial(Base):
+    __tablename__ = "textos_editoriais"
+
+    id_texto = Column(Integer, primary_key=True, autoincrement=True)
+    id_edicao = Column(String, ForeignKey("edicoes.id_edicao"), nullable=False)
+    tipo = Column(String, nullable=False)
+    autor = Column(String, nullable=True)
+    cargo = Column(String, nullable=True)
+    titulo = Column(String, nullable=True)
+    subtitulo = Column(String, nullable=True)
+    texto = Column(Text, nullable=True)
+    frase_destaque = Column(String, nullable=True)
+    imagem_autor = Column(String, nullable=True)
+```
+
+✅ Bate com o contrato v3 (`GET /editorial/{tipo}`): `tipo`, `autor`, `cargo`, `titulo`, `subtitulo`, `texto`, `frase_destaque`, `imagem_autor` — inclusive campos nulos (`subtitulo`, `frase_destaque`) aparecem explicitamente como `null`, conforme o padrão de "nunca omitir a chave" definido no contrato.
+
+> **Resolvido na v3:** o endpoint agora devolve uma lista (carta da CEO + carta do Editor-Chefe), como o guia de implementação já recomendava. A divergência apontada na rodada anterior (objeto único) foi corrigida.
+
+---
+
+### 3.10 · metodologia
+
+Cada linha é um critério metodológico de uma fonte de dados, dentro de uma edição.
+
+| Campo | Tipo (SQLAlchemy) | PK/FK | Nulo? | Descrição |
+|---|---|---|---|---|
+| `id_metodologia` | Integer | PK (auto) | não | Gerado. |
+| `id_edicao` | String | FK → edicoes | não | Edição à qual pertence. |
+| `fonte` | String | — | sim | Fiscal, Financeiro, Contábil, Pessoal/eSocial... |
+| `criterio` | String | — | sim | Critério metodológico. |
+| `descricao` | Text | — | sim | Explicação do critério. |
+| `observacao` | Text | — | sim | Observações adicionais. |
+| `ordem` | Integer | — | sim | Ordem de exibição. |
+
+```python
+class Metodologia(Base):
+    __tablename__ = "metodologia"
+
+    id_metodologia = Column(Integer, primary_key=True, autoincrement=True)
+    id_edicao = Column(String, ForeignKey("edicoes.id_edicao"), nullable=False)
+    fonte = Column(String, nullable=True)
+    criterio = Column(String, nullable=True)
+    descricao = Column(Text, nullable=True)
+    observacao = Column(Text, nullable=True)
+    ordem = Column(Integer, nullable=True)
+```
+
+⚠️ **Divergência 6 — formato da resposta (agora reconhecida oficialmente no contrato v3):** o contrato v3 continua mostrando `GET /metodologia` devolvendo dois arrays separados: `"fontes":[...]` e `"criterios":[...]`. No banco, cada linha já é um par fonte + critério + descrição. A boa notícia é que a v3 já lista isso na tabela de pendências oficiais do contrato (seção 17): "granularidade da resposta: listas simples vs. registros com descrição por critério" — ou seja, o próprio time de API já sabe que esse formato pode mudar. Recomendação se mantém: usar uma lista de objetos `{fonte, criterio, descricao}` para não perder a relação entre os dois.
+
+> ✅ **Como resolver:** esta não dá pra resolver sozinho no código — precisa de validação com quem escreveu o contrato, porque muda o schema de resposta. Formato sugerido, que já bate com o que a tabela devolve linha a linha (sem precisar de agrupamento no endpoint):
+> ```json
+> [
+>   { "fonte": "Fiscal", "criterio": "Uso da mediana", "descricao": "..." },
+>   { "fonte": "Financeiro", "criterio": "Tratamento de outliers", "descricao": "..." }
+> ]
+> ```
+
+> Nota: segundo o guia de implementação, `metodologia` também está na lista do "ainda não criar" por depender de alinhamento com o banco — documentada aqui porque já consta no contrato de API e na planilha original.
+
+---
+
+### 3.11 · indices_nucont (proposta — tabela nova, ainda não existe)
+
+Endpoint novo introduzido no contrato v3 (`GET /edicoes/{id_edicao}/indices-nucont`), usado na tela 10.9 (Índices Nucont da Economia Real). Não existe tabela para isso na planilha original nem no banco documentado até agora — a proposta abaixo segue o mesmo padrão das demais entidades, para ser validada antes de virar migration.
+
+| Campo | Tipo (SQLAlchemy) | PK/FK | Nulo? | Descrição |
+|---|---|---|---|---|
+| `id_indice_nucont` | Integer | PK (auto) | não | Gerado — não existe ID próprio na resposta do contrato. |
+| `id_edicao` | String | FK → edicoes | não | Edição à qual pertence. |
+| `nome` | String | — | não | Nome de exibição (ex: "Índice Nucont de Saúde Financeira"). |
+| `slug` | String | — | sim* | Não aparece na resposta do contrato, mas recomendo incluir — sem slug não dá pra montar uma URL própria por índice nem um endpoint de detalhe no futuro. |
+| `valor_atual` | Float | — | sim | Valor atual do índice. |
+| `variacao` | Float | — | sim | Variação em relação ao trimestre anterior. |
+| `interpretacao` | Text | — | sim | Texto de interpretação do índice. |
+| `o_que_revela` | Text | — | sim | Texto explicando o que o índice revela. |
+| `como_e_calculado_resumo` | Text | — | sim | Resumo do método de cálculo. |
+| `link_metodologia` | String | — | sim | Link para a página de metodologia completa. |
+| `ordem` | Integer | — | sim | Ordem de exibição, caso haja mais de um índice. |
+
+```python
+class IndiceNucont(Base):
+    __tablename__ = "indices_nucont"
+
+    id_indice_nucont = Column(Integer, primary_key=True, autoincrement=True)
+    id_edicao = Column(String, ForeignKey("edicoes.id_edicao"), nullable=False)
+    nome = Column(String, nullable=False)
+    slug = Column(String, nullable=True)
+    valor_atual = Column(Float, nullable=True)
+    variacao = Column(Float, nullable=True)
+    interpretacao = Column(Text, nullable=True)
+    o_que_revela = Column(Text, nullable=True)
+    como_e_calculado_resumo = Column(Text, nullable=True)
+    link_metodologia = Column(String, nullable=True)
+    ordem = Column(Integer, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("id_edicao", "slug"),
+    )
+```
+
+⚠️ **Divergência 7 — entidade nova sem tabela:** o contrato v3 já expõe este endpoint com exemplo de resposta completo, mas não existe tabela para ele em nenhuma versão da documentação de banco. Além disso, os critérios de cálculo dos índices ainda estão a definir (pendência oficial do contrato) — recomendo tratar esta tabela como rascunho até o alinhamento, seguindo o padrão de 5 passos do guia de implementação (Modelo → Schema → Seed → Endpoint → Testar) só depois de validada.
+
+> ✅ **Como resolver:** não é bem uma divergência pra corrigir no código — é uma entidade que falta criar. Seguir o guia de implementação normalmente com a proposta acima, mas só depois que os critérios de cálculo forem definidos, pra não precisar de migration depois:
+> ```
+> 1. Modelo    -> class IndiceNucont(Base): ... (proposta desta seção)
+> 2. Schema    -> IndiceNucontOut / IndiceNucontDetalheOut
+> 3. Seed      -> seed_indices_nucont(db)
+> 4. Endpoint  -> GET /edicoes/{id_edicao}/indices-nucont
+> 5. Testar    -> conferir contra o exemplo do contrato v3
+> ```
+
+---
+
+## 4. Endpoints do contrato sem tabela correspondente
+
+Estes endpoints existem no contrato de API v3, mas não têm tabela pronta no banco atual — ou dependem de decisão pendente:
+
+- **`POST /api/v1/cadastro`** — cadastro de leads (`nome`, `email`, `empresa`, `cargo`, `perfil`). Dado operacional gerado pela aplicação, não vem da planilha; precisa de tabela própria (ex: `usuarios_cadastro`), ainda não modelada. O próprio contrato v3 já confirma isso na seção "Estrutura dos dados".
+- **`GET /alertas-oportunidades`** — o contrato espera alertas/oportunidades estruturados com título + descrição. Hoje `alerta`/`oportunidade` são só um campo de texto solto dentro de `setores`/`regioes`, sem título próprio. O contrato v3 já reconhece isso oficialmente como pendência: "decisão sobre dados derivados de setor/região vs. conteúdo editorial independente".
+- **`GET /matriz-crescimento-saude`** — sem tabela no banco ainda. O contrato v3 já reconhece como pendência: "critérios de classificação por quadrante; onde guardar no banco".
+- **`GET /indices-nucont`** — endpoint novo na v3, sem tabela no banco. Proposta de modelagem na seção 3.11. Pendência oficial do contrato: "critérios de cálculo dos índices proprietários".
+
+---
+
+## 5. Resumo das divergências
+
+Atualizado após a revisão do contrato v3 — inclui o status de cada ponto levantado na rodada anterior.
+
+| # | Onde | Problema | Status |
+|---|---|---|---|
+| 1 | `indicadores` → setores/regiões no JSON | Contrato espera nome de exibição; banco guarda slug — precisa de join. | Aberta |
+| 2 | `setores.nome_setor` | Contrato usa `"nome"`; banco usa `nome_setor`. | Aberta |
+| 3 | `regioes.nome_regiao` | Contrato usa `"nome"`; banco usa `nome_regiao`. | Aberta |
+| 4 | `rankings` | Contrato agora devolve lista agrupada por `(id_edicao, slug)`, como recomendado. | **Resolvida (v3)** |
+| 5 | `textos_editoriais` (`/editorial/{tipo}`) | Contrato agora devolve lista, como recomendado. | **Resolvida (v3)** |
+| 6 | `metodologia` | Contrato mostra dois arrays soltos; banco tem pares fonte+critério relacionados. | Reconhecida no contrato |
+| 7 | `indices_nucont` | Endpoint novo na v3, sem tabela no banco. Proposta de modelagem na seção 3.11. | Nova (v3) |
